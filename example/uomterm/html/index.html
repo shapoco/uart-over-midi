@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8">
+    <title>uomterm</title>
+    <style>
+      body {
+        margin: 20px 0px;
+        padding: 0px;
+        text-align: center;
+        font-family: sans-serif;
+        font-size: 28px;
+      }
+      a {
+        color: #0cf !important;
+      }
+      input, select {
+        font-size: 28px;
+      }
+      hr {
+        width: 980px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>UART over MIDI</h1>
+    
+    <form>
+      In:
+      <select id="insel">
+        <option value="-1">No Device</option>
+      </select>
+      
+      Out:
+      <select id="outsel">
+        <option value="-1">No Device</option>
+      </select>
+    </form>
+    
+    <form>
+      Baudrate:
+      <input type="text" id="baud" size="10" value="115200">
+      <input type="button" onclick="uartSetup();" value="Set">
+    </form>
+
+    <canvas id="canvas" width="960" height="480" style="touch-action: none;"></canvas>
+
+    <form>
+      <input type="text" id="command">
+      <input type="button" onclick="uartSend();" value="Return">
+    </form>
+    
+    <script>
+      const UOM_CTL_TRANS_CMD = 0x01;
+      const UOM_CTL_SETUP_CMD = 0x02;
+      const UOM_CTL_SETUP_ACK = 0x42;
+
+      const UOM_STS_NONE = 0x00;
+
+      const UOM_OK = 0;
+      const UOM_ERR_MIDI_RX_BUFF_OVFL = 1;
+      const UOM_ERR_MIDI_INVALID_MSG = 2;
+      const UOM_ERR_INVALID_MARKER = 3;
+      const UOM_ERR_SYNTAX = 4;
+      const UOM_ERR_INVALID_PARAM = 5;
+      const UOM_ERR_INVALID_CTL_CODE = 6;
+      const UOM_ERR_NO_FUNCTION = 7;
+
+      const UOM_PARITY_NONE = 0;
+      const UOM_PARITY_EVEN = 1;
+      const UOM_PARITY_ODD = 2;
+
+      var midiIns = [];
+      var midiOuts = [];
+      var inIndex = -1;
+      var outIndex = -1;
+      var timeoutId = -1;
+
+      class Terminal {
+        constructor() {
+          this.COLS = 80;
+          this.ROWS = 20;
+          this.buffer = [];
+          this.x = 0;
+          this.y = 0;
+          for (var i = 0; i < this.COLS * this.ROWS; i++) {
+            this.buffer.push(0x00);
+          }
+        }
+
+        push(c) {
+          if (c == 0xd) { // \r
+            this.x = 0; 
+          }
+          else if (c == 0xa) { // \n
+            if (this.y < this.ROWS - 1) {
+              this.y++;
+            }
+            else {
+              this.lineFeed();
+            }
+            this.x = 0;
+          }
+          else {
+            this.buffer[this.y * this.COLS + this.x] = c;
+            if (this.x < this.COLS - 1) {
+              this.x++;
+            }
+            else if (this.y < this.ROWS - 1) {
+              this.y++;
+              this.x = 0;
+            }
+            else {
+              this.lineFeed();
+              this.x = 0;
+            }
+          }
+        }
+
+        lineFeed() {
+          for (var y = 0; y < this.ROWS - 1; y++) {
+            for (var x = 0; x < this.COLS; x++) {
+              this.buffer[y * this.COLS + x] = this.buffer[(y + 1) * this.COLS + x];
+            }
+          }
+          for (var x = 0; x < this.COLS; x++) {
+            this.buffer[(this.ROWS - 1) * this.COLS + x] = 0x0;
+          }
+        }
+        
+        printLine(s) {
+          const data = new TextEncoder().encode(s);
+          for (var i = 0; i < data.length; i++) {
+            this.push(data[i]);
+          }
+          this.push(0xa);
+          render();
+        }
+      }
+      var term = new Terminal();
+
+      function init() {
+        navigator.requestMIDIAccess({sysex:true}).then(successCallback, errorCallback);
+        render();
+      }
+
+      function successCallback(access) {
+        var inSel = document.querySelector("#insel"); 
+        var inIter = access.inputs.values();
+        for (var o = inIter.next(), i = 0; !o.done; o = inIter.next(), i++) {
+          midiIns.push(o.value);
+          inSel.appendChild(new Option(o.value['name'], i));
+        }
+        
+        var outSel = document.querySelector("#outsel"); 
+        var outIter = access.outputs.values();
+        for (var o = outIter.next(), i = 0; !o.done; o = outIter.next(), i++) {
+          midiOuts.push(o.value);
+          outSel.appendChild(new Option(o.value['name'], i));
+        }
+        
+        inSel.addEventListener("change", midiDeviceChanged);
+        outSel.addEventListener("change", midiDeviceChanged);
+      }
+
+      function errorCallback(msg) {
+        console.log("[ERROR] ", msg);
+      }
+
+      function midiDeviceChanged(e) {
+        if (inIndex >= 0) {
+          midiIns[inIndex].onmidimessage = null;
+        }
+        inIndex = parseInt(document.querySelector('#insel').value); 
+        outIndex = parseInt(document.querySelector('#outsel').value); 
+        if (inIndex >= 0) {
+          midiIns[inIndex].onmidimessage = midiReceived;
+        }
+        if (inIndex >= 0 && outIndex >= 0) {
+          
+        }
+      }
+
+      function midiReceived(e) {
+        const ret = sysexRecv(e.data);
+        if (ret != UOM_OK) {
+          term.printLine("sysexRecv() failed: Code=" + ret);
+        }
+      }
+      
+      function sysexRecv(data) {
+        const len = data.length;
+        if (len < 3) {
+          return UOM_ERR_MIDI_INVALID_MSG;
+        }
+        if (data[0] != 0xf0 || data[len-1] != 0xf7) {
+          return UOM_ERR_MIDI_INVALID_MSG;
+        }
+
+        var payload_offset = 2;
+        var manufacture_id = data[1];
+        if (manufacture_id == 0x00) {
+          if (len < 5) {
+            return UOM_ERR_MIDI_INVALID_MSG;
+          }
+          manufacture_id |= (data[2]) << 8;
+          manufacture_id |= data[3];
+          payload_offset = 4;
+        }
+
+        const payload_len = len - payload_offset - 1;
+        const payload = data.slice(payload_offset, payload_offset + payload_len);
+
+        if (payload_len < 5) return UOM_ERR_SYNTAX;
+
+        var marker_ok = 
+            (payload[0] == 0x55) &&
+            (payload[1] == 0x6f) &&
+            (payload[2] == 0x4d);
+        if (!marker_ok) return UOM_ERR_INVALID_MARKER;
+
+        var control_byte = payload[3];
+        var status_byte = payload[4];
+
+        var phase = 0;
+        var tmp = 0;
+        var n = 0;
+        var buff = [];
+        for (var i = 5; i < payload_len; i++) {
+          const b = payload[i];
+          switch (phase) {
+          case 0: tmp = b & 0x7f; break;
+          case 1: buff[n++] = ((b << 7) & 0x80) | tmp; tmp = (b >> 1) & 0x3f; break;
+          case 2: buff[n++] = ((b << 6) & 0xc0) | tmp; tmp = (b >> 2) & 0x1f; break;
+          case 3: buff[n++] = ((b << 5) & 0xe0) | tmp; tmp = (b >> 3) & 0x0f; break;
+          case 4: buff[n++] = ((b << 4) & 0xf0) | tmp; tmp = (b >> 4) & 0x07; break;
+          case 5: buff[n++] = ((b << 3) & 0xf8) | tmp; tmp = (b >> 5) & 0x03; break;
+          case 6: buff[n++] = ((b << 2) & 0xfc) | tmp; tmp = (b >> 6) & 0x01; break;
+          case 7: buff[n++] = ((b << 1) & 0xfe) | tmp;
+          }
+          phase = (phase + 1) & 0x7;
+        }
+        
+        var ret;
+        switch(control_byte) {
+        case UOM_CTL_TRANS_CMD:
+          for (var i = 0; i < buff.length; i++) {
+            term.push(buff[i]);
+          }
+          ret = UOM_OK;
+          break;
+        
+        case UOM_CTL_SETUP_CMD:
+          ret = UOM_ERR_NO_FUNCTION;
+          break;
+        
+        case UOM_CTL_SETUP_ACK:
+          if (buff.length == 1) {
+            if (buff[0] == UOM_OK) {
+              term.printLine("SETUP_CMD Succeeded");
+            }
+            else {
+              term.printLine("SETUP_CMD Failed: Code=" + buff[0]);
+            }
+            ret = UOM_OK;
+          }
+          else {
+            ret = UOM_ERR_SYNTAX;
+          }
+          break;
+          
+        default:
+          ret = UOM_ERR_INVALID_CTL_CODE;
+        }
+
+        if (timeoutId >= 0) clearTimeout(timeoutId);
+        timeoutId = setTimeout(render, 20);
+        
+        return ret;
+      }
+
+      function uartSend() {
+        const command = document.querySelector('#command').value + '\n';
+        const data = new TextEncoder().encode(command);
+        sysexSend(UOM_CTL_TRANS_CMD, UOM_STS_NONE, data);
+      }
+
+      function uartSetup() {
+        term.printLine("Sending SETUP_CMD...");
+        var data = [];
+        const baud = parseInt(document.querySelector('#baud').value);
+        data[0] = baud & 0xff;
+        data[1] = (baud >> 8) & 0xff;
+        data[2] = (baud >> 16) & 0xff;
+        data[3] = (baud >> 24) & 0xff;
+        data[4] = 8; // data_bits
+        data[5] = 1; // stop_bits
+        data[6] = UOM_PARITY_NONE;
+        data[7] = 0; // reserved
+        sysexSend(UOM_CTL_SETUP_CMD, UOM_STS_NONE, data);
+      }
+
+      function sysexSend(ctl, sts, data) {
+        if (outIndex < 0) return;
+
+        const len = data.length;
+
+        var n = 0;
+        var tx_buff = [];
+        tx_buff[n++] = 0xf0;
+        tx_buff[n++] = 0x7d;
+        tx_buff[n++] = 0x55; // 'U'
+        tx_buff[n++] = 0x6f; // 'o'
+        tx_buff[n++] = 0x4d; // 'M'
+        tx_buff[n++] = ctl;
+        tx_buff[n++] = sts;
+
+        var phase = 0;
+        var tmp = 0;
+        for (var i = 0; i < len; i++) {
+          var b = data[i];
+          switch (phase) {
+          case 0: tx_buff[n++] = b & 0x7f; tmp = (b >> 7) & 0x01; break;
+          case 1: tx_buff[n++] = ((b << 1) & 0x7e) | tmp; tmp = (b >> 6) & 0x03; break;
+          case 2: tx_buff[n++] = ((b << 2) & 0x7c) | tmp; tmp = (b >> 5) & 0x07; break;
+          case 3: tx_buff[n++] = ((b << 3) & 0x78) | tmp; tmp = (b >> 4) & 0x0f; break;
+          case 4: tx_buff[n++] = ((b << 4) & 0x70) | tmp; tmp = (b >> 3) & 0x1f; break;
+          case 5: tx_buff[n++] = ((b << 5) & 0x60) | tmp; tmp = (b >> 2) & 0x3f; break;
+          case 6: tx_buff[n++] = ((b << 6) & 0x40) | tmp; tx_buff[n++] = (b >> 1) & 0x7f; break;
+          }
+          if (phase < 6) {
+              phase++;
+          }
+          else {
+              phase = 0;
+          }
+        }
+
+        if (phase != 0) {
+            tx_buff[n++] = tmp;
+        }
+
+        tx_buff[n++] = 0xf7;
+        
+        midiOuts[outIndex].send(tx_buff);
+      }
+
+      function render() {
+        const canvas = document.querySelector('#canvas');
+        const g = canvas.getContext('2d');
+        
+        const CW = 12;
+        const CH = 24;
+
+        g.fillStyle = '#222';
+        g.fillRect(0, 0, canvas.width, canvas.height);
+
+        g.fillStyle = '#ccc';
+        g.font = '20px monospace';
+        for (var iy = 0; iy < term.ROWS; iy++) {
+          for (var ix = 0; ix < term.COLS; ix++) {
+            const c = term.buffer[iy * term.COLS + ix];
+            if (c == 0x00 || c == 0x20) {
+              // ignore
+            }
+            else if (0x21 <= c && c <= 0x7e) {
+              g.fillText(String.fromCharCode(c), ix * CW, iy * CH + CH * 3 / 4);
+            }
+            else {
+              g.fillText('.', ix * CW, iy * CH + CH * 3 / 4);
+            }
+          }
+        }
+
+        g.fillStyle = '#ccc';
+        g.fillRect(term.x * CW, term.y * CH, CW, CH);
+      }
+
+      init();
+    </script>
+  </body>
+</html>
+
