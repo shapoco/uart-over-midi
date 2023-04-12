@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8">
+    <title>uomterm</title>
+    <style>
+      body {
+        margin: 20px 0px;
+        padding: 0px;
+        text-align: center;
+        font-family: sans-serif;
+        font-size: 28px;
+      }
+      a {
+        color: #0cf !important;
+      }
+      input, select {
+        font-size: 28px;
+      }
+      hr {
+        width: 980px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>HUB75 over MIDI</h1>
+    
+    <form>
+      Output:
+      <select id="outsel">
+        <option value="-1">No Device</option>
+      </select>
+      Color:
+      <input id="color" size="6" value="ffffff">
+      <input type="button" value="Clear" onclick="onClearClicked();"> 
+    </form>
+
+    <canvas id="canvas" width="960" height="480" style="touch-action: none;"></canvas>
+
+    <script>
+      var midiOuts = [];
+      var outIndex = -1;
+      var timeoutId = -1;
+      var mouseX = 0;
+      var mouseY = 0;
+      var mouseDown = false;
+
+      function init() {
+        navigator.requestMIDIAccess({sysex:true}).then(successCallback, errorCallback);
+        const canvas = document.querySelector('#canvas');
+        canvas.addEventListener('pointerdown', onPointerDown, false);
+        canvas.addEventListener('pointermove',onPointerMove, false);
+        canvas.addEventListener('pointerup', onPointerUp, false);
+        onClearClicked();
+      }
+
+      function successCallback(access) {
+        var outSel = document.querySelector("#outsel"); 
+        var outIter = access.outputs.values();
+        for (var o = outIter.next(), i = 0; !o.done; o = outIter.next(), i++) {
+          midiOuts.push(o.value);
+          outSel.appendChild(new Option(o.value['name'], i));
+        }
+        outSel.addEventListener("change", midiDeviceChanged);
+      }
+
+      function errorCallback(msg) {
+        console.log("[ERROR] ", msg);
+      }
+
+      function midiDeviceChanged(e) {
+        outIndex = parseInt(document.querySelector('#outsel').value); 
+        if (outIndex >= 0) {
+          onClearClicked();
+        }
+      }
+
+      function uartSend(data) {
+        if (outIndex < 0) return;
+
+        const len = data.length;
+
+        var n = 0;
+        var tx_buff = [];
+        tx_buff[n++] = 0xf0;
+        tx_buff[n++] = 0x7d;
+        tx_buff[n++] = 0x55;
+        tx_buff[n++] = 0x6f;
+        tx_buff[n++] = 0x4d;
+        tx_buff[n++] = 0x01;
+        tx_buff[n++] = 0x00;
+
+        var phase = 0;
+        var tmp = 0;
+        for (var i = 0; i < len; i++) {
+          var b = data[i];
+          switch (phase) {
+          case 0: tx_buff[n++] = b & 0x7f; tmp = (b >> 7) & 0x01; break;
+          case 1: tx_buff[n++] = ((b << 1) & 0x7e) | tmp; tmp = (b >> 6) & 0x03; break;
+          case 2: tx_buff[n++] = ((b << 2) & 0x7c) | tmp; tmp = (b >> 5) & 0x07; break;
+          case 3: tx_buff[n++] = ((b << 3) & 0x78) | tmp; tmp = (b >> 4) & 0x0f; break;
+          case 4: tx_buff[n++] = ((b << 4) & 0x70) | tmp; tmp = (b >> 3) & 0x1f; break;
+          case 5: tx_buff[n++] = ((b << 5) & 0x60) | tmp; tmp = (b >> 2) & 0x3f; break;
+          case 6: tx_buff[n++] = ((b << 6) & 0x40) | tmp; tx_buff[n++] = (b >> 1) & 0x7f; break;
+          }
+          if (phase < 6) {
+              phase++;
+          }
+          else {
+              phase = 0;
+          }
+        }
+
+        if (phase != 0) {
+            tx_buff[n++] = tmp;
+        }
+
+        tx_buff[n++] = 0xf7;
+
+        midiOuts[outIndex].send(tx_buff);
+      }
+
+      function onClearClicked() {
+        var data = [];
+        data[0] = 2;
+        uartSend(data);
+
+        const canvas = document.querySelector('#canvas');
+        const g = canvas.getContext('2d');
+        g.fillStyle = '#000';
+        g.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      function onPointerDown(e) {
+        e.preventDefault();
+        canvas.setPointerCapture(e.pointerId);
+        mouseX = Math.floor(64 * e.offsetX / canvas.clientWidth);
+        mouseY = Math.floor(32 * e.offsetY / canvas.clientHeight);
+        mouseDown = true;
+      }
+
+      function onPointerMove(e) {
+        e.preventDefault();
+        mouseX = Math.floor(64 * e.offsetX / canvas.clientWidth);
+        mouseY = Math.floor(32 * e.offsetY / canvas.clientHeight);
+        
+        color = parseInt(document.querySelector('#color').value, 16);
+
+        if (mouseDown) {
+          var data = [];
+          data[0] = 1;
+          data[1] = mouseX;
+          data[2] = mouseY;
+          data[3] = (color >> 16) & 0xff;
+          data[4] = (color >> 8) & 0xff;
+          data[5] = color & 0xff;
+          uartSend(data);
+        
+          const canvas = document.querySelector('#canvas');
+          const g = canvas.getContext('2d');
+          g.fillStyle = '#' + ('000000' + color.toString(16)).substr(-6);
+          g.fillRect(mouseX * 15, mouseY * 15, 15, 15);
+        }
+      }
+      
+      function onPointerUp(e) {
+        e.preventDefault();
+        canvas.releasePointerCapture(e.pointerId);
+        mouseDown = false;
+      }
+      
+      init();
+    </script>
+  </body>
+</html>
+
