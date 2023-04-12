@@ -1,4 +1,8 @@
-# UART over MIDI
+# UoM: UART over MIDI
+
+## Overview
+
+A protocol for transferring arbitrary byte sequences using MIDI.
 
 ## Protocol
 
@@ -26,3 +30,5 @@
 |5|UOM_ERR_INVALID_PARAM|Invalid Parameter|
 |6|UOM_ERR_INVALID_CTL_CODE|Unknown Control Code|
 |7|UOM_ERR_NO_FUNCTION|Function Not Supported|
+
+----
