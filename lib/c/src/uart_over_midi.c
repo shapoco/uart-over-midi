@@ -143,10 +143,18 @@ static uom_result_t sysex_recv(const uint8_t *data, int len) {
     
     switch (control_byte) {
     case UOM_CTL_TRANS_CMD:
-        return cfg.uart_recv(tx_buff, n);
+        if (cfg.uart_recv != NULL) {
+            return cfg.uart_recv(tx_buff, n);
+        }
+        else {
+            return UOM_ERR_NO_FUNCTION;
+        }
         
     case UOM_CTL_SETUP_CMD: {
         uom_result_t ret = UOM_OK;
+        if (cfg.uart_setup == NULL) {
+            ret = UOM_ERR_NO_FUNCTION;
+        }
         if (n == 8) {
             uom_uart_config_t uart_cfg;
             uart_cfg.baudrate =
@@ -178,6 +186,10 @@ static uom_result_t sysex_recv(const uint8_t *data, int len) {
 }
 
 static uom_result_t sysex_send(uom_control_t ctl, uom_status_t sts, const uint8_t *data, int len) {
+    if (cfg.midi_send == NULL) {
+        return UOM_ERR_NO_FUNCTION;
+    }
+
     int n = 0;
     tx_buff[n++] = 0xf0;
     tx_buff[n++] = 0x7d;

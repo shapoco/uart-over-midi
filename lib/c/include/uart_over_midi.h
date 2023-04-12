@@ -2,6 +2,7 @@
 #define SERIAL_OVER_MIDI_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define UOM_MAX_BYTE_BLK_LEN (7 * 255)
 #define UOM_MAX_MIDI_MSG_LEN ((UOM_MAX_BYTE_BLK_LEN / 7) * 8 + 8)
